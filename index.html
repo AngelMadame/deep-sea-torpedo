@@ -2,11 +2,12 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
-<title>深海求生 Deep Sea Survivor v1.1</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>深海求生 Deep Sea Survivor v1.2</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;display:flex;justify-content:center;align-items:center;height:100vh;overflow:hidden}
-canvas{display:block}
+body{background:#000;display:flex;justify-content:center;align-items:center;height:100vh;width:100vw;overflow:hidden;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+canvas{display:block;max-width:100vw;max-height:100vh;object-fit:contain;image-rendering:auto}
 </style>
 </head>
 <body>
@@ -118,16 +119,70 @@ const ctx=canvas.getContext('2d');
 
 const keys={};
 window.addEventListener('keydown',e=>{keys[e.code]=true;
- if(['Space','Enter','Digit1','Digit2','Digit3','KeyR','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault()});
+ if(['Space','Enter','Digit1','Digit2','Digit3','KeyR','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Escape'].includes(e.code))e.preventDefault();
+ if(e.code==='Escape'){if(scene===SC.PLAYING||scene===SC.UPGRADE){scene=SC.PAUSED;pauseMenuIdx=0}else if(scene===SC.PAUSED){scene=SC.PLAYING}};});
 window.addEventListener('keyup',e=>{keys[e.code]=false});
 let mx=0,my=0,mclick=false;
 canvas.addEventListener('mousemove',e=>{const r=canvas.getBoundingClientRect();mx=e.clientX-r.left;my=e.clientY-r.top});
 canvas.addEventListener('click',()=>{mclick=true});
 
+// Touch events for joystick + mobile pause
+function canvasCoords(e){
+ const t=e.touches[0]||e.changedTouches[0];
+ if(!t)return null;
+ const r=canvas.getBoundingClientRect();
+ const sx=(t.clientX-r.left)*(W/r.width);
+ const sy=(t.clientY-r.top)*(H/r.height);
+ return {x:sx,y:sy};
+}
+canvas.addEventListener('touchstart',e=>{
+ const c=canvasCoords(e);if(!c)return;
+ mx=c.x;my=c.y;
+ // Check mobile pause button (top-right, ~55x44 area)
+ if(isMobile&&c.x>W-60&&c.y<60){mclick=true;return}
+ // Start joystick on left half (only during gameplay)
+ if(c.x<W/2&&!joystick.active&&(scene===SC.PLAYING||scene===SC.UPGRADE)){
+  joystick.active=true;joystick.touchId=e.touches[0].identifier;
+  joystick.baseX=c.x;joystick.baseY=c.y;
+  joystick.thumbX=c.x;joystick.thumbY=c.y;joystick.dx=0;joystick.dy=0;
+ }
+},{passive:false});
+canvas.addEventListener('touchmove',e=>{
+ e.preventDefault();
+ for(let i=0;i<e.touches.length;i++){
+  if(e.touches[i].identifier===joystick.touchId){
+   const t=e.touches[i];
+   const r=canvas.getBoundingClientRect();
+   const sx=(t.clientX-r.left)*(W/r.width);
+   const sy=(t.clientY-r.top)*(H/r.height);
+   const jR=50,dx=sx-joystick.baseX,dy=sy-joystick.baseY;
+   const d=Math.sqrt(dx*dx+dy*dy),clampD=Math.min(d,jR);
+   const ang=Math.atan2(dy,dx);
+   joystick.thumbX=joystick.baseX+Math.cos(ang)*clampD;
+   joystick.thumbY=joystick.baseY+Math.sin(ang)*clampD;
+   joystick.dx=d>5?Math.cos(ang)*(clampD/jR):0;
+   joystick.dy=d>5?Math.sin(ang)*(clampD/jR):0;
+   return;
+  }
+ }
+},{passive:false});
+canvas.addEventListener('touchend',e=>{
+ for(let i=0;i<e.changedTouches.length;i++){
+  if(e.changedTouches[i].identifier===joystick.touchId){
+   joystick.active=false;joystick.touchId=null;
+   joystick.dx=0;joystick.dy=0;
+   return;
+  }
+ }
+});
+canvas.addEventListener('touchcancel',e=>{
+ joystick.active=false;joystick.touchId=null;joystick.dx=0;joystick.dy=0;
+});
+
 // ============================================================
 // [GAME STATE]
 // ============================================================
-const SC={MENU:0,PLAYING:1,UPGRADE:2,END:3};
+const SC={MENU:0,PLAYING:1,UPGRADE:2,END:3,PAUSED:4};
 let scene=SC.MENU,gt,kills,level,xp,xpNext,victory;
 let player,enemies,projs,orbs,particles,bgParts;
 let spawnT,dmgCD,torpT,sonT,camera;
@@ -141,6 +196,14 @@ let menuSubIdx,menuDiffIdx,menuMsg,menuMsgT;
 let endCoins,endCoinAnim;
 // tier flash
 let tierFlash,prevTier;
+// mobile detection
+const isMobile=/Android|iPhone|iPad|iPod|webOS/i.test(navigator.userAgent)||('ontouchstart' in window);
+// pause menu
+let pauseMenuIdx=0;
+// virtual joystick
+let joystick={active:false,baseX:0,baseY:0,thumbX:0,thumbY:0,dx:0,dy:0,touchId:null};
+// mobile pause button
+let mobilePauseBtn={hover:false};
 
 function getSubIdx(){return SUBMARINES.findIndex(s=>s.id===saveData.selectedSub)||0}
 function getDiffIdx(){return DIFFICULTIES.findIndex(d=>d.id===saveData.selectedDiff);} 
@@ -198,6 +261,8 @@ function updPlayer(dt){
  if(keys.KeyS||keys.ArrowDown)dy=1;
  if(keys.KeyA||keys.ArrowLeft)dx=-1;
  if(keys.KeyD||keys.ArrowRight)dx=1;
+ // joystick override (mobile)
+ if(joystick.active&&(joystick.dy!==0||joystick.dx!==0)){dx=joystick.dx;dy=joystick.dy}
  if(dx||dy){const n=norm(dx,dy);player.x+=n.x*player.speed*dt;player.y+=n.y*player.speed*dt;player.angle=Math.atan2(n.y,n.x)}
  if(player.invT>0)player.invT-=dt;
  if(player.flashT>0)player.flashT-=dt;
@@ -420,7 +485,8 @@ function endGame(win){
 // [MAIN UPDATE]
 // ============================================================
 function update(dt){
- if(scene!==SC.PLAYING)return;
+ if(scene!==SC.PLAYING&&scene!==SC.UPGRADE)return;
+ if(scene===SC.PAUSED)return;
  gt+=dt;
  if(gt>=GAME_DURATION){gt=GAME_DURATION;endGame(true);return}
  updPlayer(dt);updCam();updSpawn(dt);updEnemies(dt);updProjs(dt);updSonar(dt);updOrbs(dt);
@@ -690,6 +756,27 @@ function drawHUD(){
   ctx.textAlign='center';ctx.font='bold 36px monospace';
   ctx.fillStyle=`rgba(255,255,100,${lvFlash})`;ctx.fillText('LEVEL UP!',W/2,H/2-50);
  }
+ // mobile pause button
+ if(isMobile&&(scene===SC.PLAYING||scene===SC.UPGRADE)){
+  const pbX=W-55,pbY=8,pbS=44;
+  const hover=mx>=pbX&&mx<=pbX+pbS&&my>=pbY&&my<=pbY+pbS;
+  mobilePauseBtn.hover=hover;
+  ctx.fillStyle=hover?'rgba(255,255,255,0.25)':'rgba(0,0,0,0.5)';
+  ctx.fillRect(pbX,pbY,pbS,pbS);
+  ctx.strokeStyle='rgba(255,255,255,0.6)';ctx.lineWidth=2;
+  ctx.strokeRect(pbX,pbY,pbS,pbS);
+  ctx.fillStyle='#fff';ctx.fillRect(pbX+13,pbY+12,6,20);
+  ctx.fillRect(pbX+25,pbY+12,6,20);
+ }
+}
+function drawJoystick(){
+ if(!joystick.active)return;
+ const jR=50;
+ ctx.fillStyle='rgba(255,255,255,0.08)';ctx.beginPath();ctx.arc(joystick.baseX,joystick.baseY,jR,0,Math.PI*2);ctx.fill();
+ ctx.strokeStyle='rgba(255,255,255,0.2)';ctx.lineWidth=2;ctx.beginPath();ctx.arc(joystick.baseX,joystick.baseY,jR,0,Math.PI*2);ctx.stroke();
+ ctx.fillStyle='rgba(255,255,255,0.25)';ctx.beginPath();ctx.arc(joystick.thumbX,joystick.thumbY,24,0,Math.PI*2);ctx.fill();
+ ctx.strokeStyle='rgba(200,220,255,0.5)';ctx.lineWidth=2;ctx.beginPath();ctx.arc(joystick.thumbX,joystick.thumbY,24,0,Math.PI*2);ctx.stroke();
+ ctx.fillStyle='rgba(200,220,255,0.4)';ctx.beginPath();ctx.arc(joystick.thumbX,joystick.thumbY,10,0,Math.PI*2);ctx.fill();
 }
 
 function fmtTime(s){const m=Math.floor(s/60),sc=Math.floor(s%60);return`${m}:${sc.toString().padStart(2,'0')}`}
@@ -912,6 +999,48 @@ function drawEnd(){
 }
 
 // ============================================================
+// [SCENE — PAUSE MENU]
+// ============================================================
+const PAUSE_BTNS=[
+ {label:'继续游戏',key:'ESC',action(){scene=SC.PLAYING}},
+ {label:'重新开始',key:'R',action(){initGame();scene=SC.PLAYING}},
+ {label:'返回菜单',key:'M',action(){scene=SC.MENU;initMenuState()}}
+];
+function drawPause(){
+ ctx.fillStyle='rgba(0,0,10,0.8)';ctx.fillRect(0,0,W,H);
+ ctx.textAlign='center';
+ ctx.font='bold 36px monospace';ctx.fillStyle='#44ffcc';
+ ctx.fillText('⏸ 游戏暂停',W/2,H/2-110);
+
+ for(let i=0;i<PAUSE_BTNS.length;i++){
+  const bw=280,bh=50,gap=16;
+  const bx=(W-bw)/2,by=H/2-50+i*(bh+gap);
+  const hover=mx>=bx&&mx<=bx+bw&&my>=by&&my<=by+bh;
+  const selected=i===pauseMenuIdx;
+
+  ctx.fillStyle=hover?'rgba(40,80,140,0.8)':selected?'rgba(30,60,120,0.6)':'rgba(20,30,60,0.6)';
+  ctx.fillRect(bx,by,bw,bh);
+  ctx.strokeStyle=hover||selected?'#44ffcc':'#335577';ctx.lineWidth=hover||selected?2:1;
+  ctx.strokeRect(bx,by,bw,bh);
+
+  ctx.font='bold 18px monospace';ctx.fillStyle='#fff';ctx.fillText(PAUSE_BTNS[i].label,bx+bw/2,by+20);
+  ctx.font='12px monospace';ctx.fillStyle='#6688aa';ctx.fillText(`[${PAUSE_BTNS[i].key}]`,bx+bw/2,by+40);
+
+  if(hover&&mclick){PAUSE_BTNS[i].action();mclick=false;return}
+ }
+
+ const blink=Math.sin(Date.now()/300)>0;
+ if(blink){ctx.font='14px monospace';ctx.fillStyle='#6688aa';
+  ctx.fillText('按 ESC 继续 | ↑↓ 选择 | Enter 确认',W/2,H/2+155)}
+}
+function handlePauseInput(){
+ if(keys.ArrowUp||keys.KeyW){keys.ArrowUp=false;keys.KeyW=false;pauseMenuIdx=(pauseMenuIdx-1+PAUSE_BTNS.length)%PAUSE_BTNS.length}
+ if(keys.ArrowDown||keys.KeyS){keys.ArrowDown=false;keys.KeyS=false;pauseMenuIdx=(pauseMenuIdx+1)%PAUSE_BTNS.length}
+ if(keys.Enter||keys.Space){keys.Enter=false;keys.Space=false;PAUSE_BTNS[pauseMenuIdx].action()}
+ if(keys.KeyR){keys.KeyR=false;initGame();scene=SC.PLAYING}
+}
+
+// ============================================================
 // [MAIN LOOP]
 // ============================================================
 let lastT=0;
@@ -929,9 +1058,18 @@ function loop(ts){
  }else if(scene===SC.PLAYING){
   update(dt);
   drawBg();drawOrbs();drawEnemies();drawProjs();drawPlayer();drawParts();drawHUD();
+  if(isMobile){drawJoystick();
+   if(mclick&&mobilePauseBtn.hover){scene=SC.PAUSED;pauseMenuIdx=0}
+  }
  }else if(scene===SC.UPGRADE){
   drawBg();drawOrbs();drawEnemies();drawProjs();drawPlayer();drawParts();drawHUD();
+  if(isMobile){drawJoystick();
+   if(mclick&&mobilePauseBtn.hover){scene=SC.PAUSED;pauseMenuIdx=0}
+  }
   drawUpgrade();handleUpgradeInput();
+ }else if(scene===SC.PAUSED){
+  drawBg();drawOrbs();drawEnemies();drawProjs();drawPlayer();drawParts();drawHUD();
+  drawPause();handlePauseInput();
  }else if(scene===SC.END){
   drawBg();drawOrbs();drawEnemies();drawProjs();drawPlayer();drawParts();drawHUD();
   drawEnd();
