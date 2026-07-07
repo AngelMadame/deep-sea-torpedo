@@ -1,0 +1,1131 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>深海求生 Deep Sea Survivor</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+canvas { display: block; image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<script>
+// ============================================================
+// [CONFIG] — 全局常量与数值配置
+// ============================================================
+const W = 960, H = 640;
+const GAME_DURATION = 180; // 秒
+const MAX_ENEMIES = 80;
+const MAX_PARTICLES = 200;
+const XP_ORB_LIFETIME = 10; // 秒
+const DAMAGE_COOLDOWN = 0.5; // 碰撞伤害冷却
+
+const PLAYER_DEFAULTS = {
+    maxHp: 100, speed: 150, collisionRadius: 16, pickupRadius: 60,
+    torpedoDamage: 3, torpedoInterval: 0.6, torpedoCount: 1, torpedoSpeed: 300, torpedoLifetime: 2,
+    armor: 0, hasSonarPulse: false, sonarDamage: 2, sonarRadius: 80, sonarInterval: 3
+};
+
+const ENEMY_TYPES = {
+    jellyfish: { name: '水母', hp: 2, speed: 40, damage: 5, xp: 2, radius: 10, color: '#ff69ff', glowColor: 'rgba(255,105,255,0.3)' },
+    fangtooth: { name: '尖牙鱼', hp: 5, speed: 80, damage: 10, xp: 5, radius: 14, color: '#ff4444', glowColor: 'rgba(255,68,68,0.3)' },
+    octopus:   { name: '巨型章鱼', hp: 15, speed: 30, damage: 20, xp: 12, radius: 22, color: '#aa44ff', glowColor: 'rgba(170,68,255,0.3)' }
+};
+
+const WAVE_CONFIG = [
+    { duration: 30, types: ['jellyfish'], interval: 0.7, multiplier: 1.0 },
+    { duration: 30, types: ['jellyfish','fangtooth'], interval: 0.6, multiplier: 1.2 },
+    { duration: 30, types: ['jellyfish','fangtooth'], interval: 0.6, multiplier: 1.4 },
+    { duration: 30, types: ['jellyfish','fangtooth','octopus'], interval: 0.5, multiplier: 1.7 },
+    { duration: 30, types: ['jellyfish','fangtooth','octopus'], interval: 0.4, multiplier: 2.0, octopusWeight: 0.3 },
+    { duration: 30, types: ['jellyfish','fangtooth','octopus'], interval: 0.3, multiplier: 2.5, octopusWeight: 0.4 }
+];
+
+const UPGRADES = [
+    { id: 'torpedo_rate',   name: '鱼雷射速+',  desc: '攻击间隔 -15%',        icon: '⚡', stackable: true,  maxStack: Infinity },
+    { id: 'torpedo_damage', name: '鱼雷伤害+',  desc: '鱼雷伤害 +30%',        icon: '💥', stackable: true,  maxStack: Infinity },
+    { id: 'torpedo_count',  name: '多发鱼雷',   desc: '同时发射 +1',          icon: '🔱', stackable: true,  maxStack: 5 },
+    { id: 'armor',          name: '护甲强化',   desc: '受伤减少 20%',         icon: '🛡️', stackable: true,  maxStack: 3 },
+    { id: 'speed',          name: '引擎升级',   desc: '移动速度 +15%',        icon: '🚀', stackable: true,  maxStack: Infinity },
+    { id: 'magnet',         name: '磁力吸取',   desc: '拾取半径 +40%',        icon: '🧲', stackable: true,  maxStack: Infinity },
+    { id: 'heal',           name: '船体修复',   desc: '回复 30% 血量',        icon: '💚', stackable: true,  maxStack: Infinity },
+    { id: 'sonar',          name: '声波脉冲',   desc: '环形声波攻击',         icon: '🔊', stackable: false, maxStack: 1 }
+];
+
+// ============================================================
+// [UTILS] — 数学工具
+// ============================================================
+function dist(a, b) { const dx = a.x - b.x, dy = a.y - b.y; return Math.sqrt(dx*dx + dy*dy); }
+function normalize(dx, dy) { const len = Math.sqrt(dx*dx + dy*dy); return len === 0 ? {x:0,y:0} : {x:dx/len, y:dy/len}; }
+function randRange(a, b) { return a + Math.random() * (b - a); }
+function randInt(a, b) { return Math.floor(randRange(a, b+1)); }
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function circleCollide(a, ar, b, br) { return dist(a, b) < ar + br; }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// ============================================================
+// [CANVAS SETUP]
+// ============================================================
+const canvas = document.getElementById('gc');
+canvas.width = W; canvas.height = H;
+const ctx = canvas.getContext('2d');
+
+// ============================================================
+// [INPUT] — 键盘输入管理
+// ============================================================
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.code] = true; if(['Space','Enter','Digit1','Digit2','Digit3','KeyR'].includes(e.code)) e.preventDefault(); });
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+let mouseX = 0, mouseY = 0, mouseClicked = false;
+canvas.addEventListener('mousemove', e => { const r = canvas.getBoundingClientRect(); mouseX = e.clientX - r.left; mouseY = e.clientY - r.top; });
+canvas.addEventListener('click', e => { mouseClicked = true; });
+
+// ============================================================
+// [GAME STATE]
+// ============================================================
+const SCENE = { MENU: 0, PLAYING: 1, UPGRADE_PICK: 2, END: 3 };
+let scene, gameTime, kills, level, xp, xpToNext, victory;
+let player, enemies, projectiles, xpOrbs, particles, bgParticles;
+let spawnTimer, damageCooldown, torpedoTimer, sonarTimer;
+let camera;
+let upgradeOptions, upgradeStacks;
+let sonarPulseVisual; // for visual effect
+let levelUpFlash;
+
+function xpRequired(lvl) { return Math.floor(8 * Math.pow(1.35, lvl - 1)); }
+
+// ============================================================
+// [INIT]
+// ============================================================
+function initGame() {
+    scene = SCENE.PLAYING;
+    gameTime = 0; kills = 0; level = 1; xp = 0; xpToNext = xpRequired(1); victory = false;
+    
+    player = {
+        x: 0, y: 0, hp: PLAYER_DEFAULTS.maxHp, maxHp: PLAYER_DEFAULTS.maxHp,
+        speed: PLAYER_DEFAULTS.speed, collisionRadius: PLAYER_DEFAULTS.collisionRadius,
+        pickupRadius: PLAYER_DEFAULTS.pickupRadius, angle: 0, invincibleTimer: 0,
+        torpedoDamage: PLAYER_DEFAULTS.torpedoDamage, torpedoInterval: PLAYER_DEFAULTS.torpedoInterval,
+        torpedoCount: PLAYER_DEFAULTS.torpedoCount, torpedoSpeed: PLAYER_DEFAULTS.torpedoSpeed,
+        torpedoLifetime: PLAYER_DEFAULTS.torpedoLifetime,
+        armor: PLAYER_DEFAULTS.armor, hasSonarPulse: PLAYER_DEFAULTS.hasSonarPulse,
+        sonarDamage: PLAYER_DEFAULTS.sonarDamage, sonarRadius: PLAYER_DEFAULTS.sonarRadius,
+        sonarInterval: PLAYER_DEFAULTS.sonarInterval, flashTimer: 0
+    };
+    
+    enemies = []; projectiles = []; xpOrbs = []; particles = [];
+    spawnTimer = 0; damageCooldown = 0; torpedoTimer = 0; sonarTimer = 0;
+    camera = { x: 0, y: 0 };
+    upgradeOptions = []; upgradeStacks = {};
+    sonarPulseVisual = 0;
+    levelUpFlash = 0;
+    
+    // 初始化背景粒子
+    bgParticles = [];
+    for (let i = 0; i < 30; i++) {
+        bgParticles.push({
+            x: randRange(-W, W), y: randRange(-H, H),
+            vx: randRange(-5, 5), vy: randRange(-8, -2),
+            radius: randRange(1, 3), alpha: randRange(0.1, 0.4)
+        });
+    }
+}
+
+// ============================================================
+// [CAMERA]
+// ============================================================
+function updateCamera() {
+    camera.x = player.x - W / 2;
+    camera.y = player.y - H / 2;
+}
+
+function worldToScreen(wx, wy) {
+    return { x: wx - camera.x, y: wy - camera.y };
+}
+
+// ============================================================
+// [PLAYER] — 玩家更新
+// ============================================================
+function updatePlayer(dt) {
+    // 移动
+    let dx = 0, dy = 0;
+    if (keys['KeyW'] || keys['ArrowUp']) dy = -1;
+    if (keys['KeyS'] || keys['ArrowDown']) dy = 1;
+    if (keys['KeyA'] || keys['ArrowLeft']) dx = -1;
+    if (keys['KeyD'] || keys['ArrowRight']) dx = 1;
+    
+    if (dx !== 0 || dy !== 0) {
+        const n = normalize(dx, dy);
+        player.x += n.x * player.speed * dt;
+        player.y += n.y * player.speed * dt;
+        player.angle = Math.atan2(n.y, n.x);
+    }
+    
+    // 无敌计时器
+    if (player.invincibleTimer > 0) player.invincibleTimer -= dt;
+    if (player.flashTimer > 0) player.flashTimer -= dt;
+}
+
+// ============================================================
+// [PROJECTILE] — 鱼雷与声波脉冲
+// ============================================================
+function findNearestEnemy() {
+    let nearest = null, minD = Infinity;
+    for (const e of enemies) {
+        const d = dist(player, e);
+        if (d < minD) { minD = d; nearest = e; }
+    }
+    return nearest;
+}
+
+function findNearestEnemies(count) {
+    if (enemies.length === 0) return [];
+    // 按距离排序取前n个
+    const sorted = enemies.slice().sort((a, b) => dist(player, a) - dist(player, b));
+    return sorted.slice(0, count);
+}
+
+function updateTorpedoes(dt) {
+    torpedoTimer -= dt;
+    if (torpedoTimer <= 0 && enemies.length > 0) {
+        torpedoTimer = player.torpedoInterval;
+        const targets = findNearestEnemies(player.torpedoCount);
+        for (const target of targets) {
+            const dx = target.x - player.x;
+            const dy = target.y - player.y;
+            const n = normalize(dx, dy);
+            projectiles.push({
+                x: player.x, y: player.y,
+                vx: n.x * player.torpedoSpeed, vy: n.y * player.torpedoSpeed,
+                damage: player.torpedoDamage, lifetime: player.torpedoLifetime
+            });
+        }
+    }
+    
+    // 更新鱼雷
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+        const p = projectiles[i];
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.lifetime -= dt;
+        if (p.lifetime <= 0) { projectiles.splice(i, 1); continue; }
+        
+        // 碰撞检测
+        for (let j = enemies.length - 1; j >= 0; j--) {
+            const e = enemies[j];
+            if (circleCollide(p, 4, e, e.radius)) {
+                e.hp -= p.damage;
+                e.flashTimer = 0.1;
+                projectiles.splice(i, 1);
+                
+                // 生成击中粒子
+                for (let k = 0; k < 3; k++) {
+                    spawnParticle(p.x, p.y, '#ffaa00', 2);
+                }
+                
+                if (e.hp <= 0) {
+                    onEnemyKilled(e, j);
+                }
+                break;
+            }
+        }
+    }
+}
+
+function updateSonarPulse(dt) {
+    if (!player.hasSonarPulse) return;
+    sonarTimer -= dt;
+    if (sonarTimer <= 0) {
+        sonarTimer = player.sonarInterval;
+        sonarPulseVisual = 1.0;
+        
+        // 对范围内敌人造成伤害
+        for (let i = enemies.length - 1; i >= 0; i--) {
+            const e = enemies[i];
+            if (dist(player, e) <= player.sonarRadius) {
+                e.hp -= player.sonarDamage;
+                e.flashTimer = 0.1;
+                if (e.hp <= 0) {
+                    onEnemyKilled(e, i);
+                }
+            }
+        }
+    }
+    if (sonarPulseVisual > 0) sonarPulseVisual -= dt * 2;
+}
+
+// ============================================================
+// [ENEMY] — 怪物
+// ============================================================
+function spawnEnemy(type, multiplier) {
+    if (enemies.length >= MAX_ENEMIES) return;
+    const template = ENEMY_TYPES[type];
+    
+    // 从屏幕外生成
+    const angle = Math.random() * Math.PI * 2;
+    const spawnDist = Math.max(W, H) * 0.7;
+    
+    enemies.push({
+        x: player.x + Math.cos(angle) * spawnDist,
+        y: player.y + Math.sin(angle) * spawnDist,
+        hp: Math.ceil(template.hp * multiplier),
+        maxHp: Math.ceil(template.hp * multiplier),
+        speed: template.speed,
+        damage: Math.ceil(template.damage * multiplier),
+        xp: template.xp,
+        type: type,
+        radius: template.radius,
+        color: template.color,
+        glowColor: template.glowColor,
+        flashTimer: 0
+    });
+}
+
+function updateEnemies(dt) {
+    for (const e of enemies) {
+        // 朝玩家移动
+        const dx = player.x - e.x;
+        const dy = player.y - e.y;
+        const n = normalize(dx, dy);
+        e.x += n.x * e.speed * dt;
+        e.y += n.y * e.speed * dt;
+        if (e.flashTimer > 0) e.flashTimer -= dt;
+    }
+    
+    // 碰撞伤害
+    damageCooldown -= dt;
+    if (damageCooldown <= 0) {
+        let tookDamage = false;
+        for (const e of enemies) {
+            if (circleCollide(player, player.collisionRadius, e, e.radius)) {
+                let dmg = e.damage;
+                dmg = Math.ceil(dmg * (1 - player.armor));
+                player.hp -= dmg;
+                tookDamage = true;
+            }
+        }
+        if (tookDamage) {
+            damageCooldown = DAMAGE_COOLDOWN;
+            player.flashTimer = 0.2;
+            // 受伤粒子
+            for (let i = 0; i < 5; i++) {
+                spawnParticle(player.x, player.y, '#ff3333', 3);
+            }
+        }
+    }
+    
+    // 检查死亡
+    if (player.hp <= 0) {
+        player.hp = 0;
+        scene = SCENE.END;
+        victory = false;
+    }
+}
+
+function onEnemyKilled(enemy, index) {
+    kills++;
+    // 掉落经验球
+    xpOrbs.push({
+        x: enemy.x, y: enemy.y, value: enemy.xp,
+        lifetime: XP_ORB_LIFETIME, beingPulled: false
+    });
+    // 死亡粒子
+    for (let i = 0; i < 8; i++) {
+        spawnParticle(enemy.x, enemy.y, enemy.color, 4);
+    }
+    enemies.splice(index, 1);
+}
+
+// ============================================================
+// [WAVE] — 波次管理
+// ============================================================
+function getCurrentWave() {
+    let t = 0;
+    for (let i = 0; i < WAVE_CONFIG.length; i++) {
+        t += WAVE_CONFIG[i].duration;
+        if (gameTime < t) return i;
+    }
+    return WAVE_CONFIG.length - 1;
+}
+
+function updateWaveSpawning(dt) {
+    const waveIdx = getCurrentWave();
+    const wave = WAVE_CONFIG[waveIdx];
+    
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+        spawnTimer = wave.interval;
+        
+        // 选择怪物类型
+        let type;
+        if (wave.octopusWeight && Math.random() < wave.octopusWeight) {
+            type = 'octopus';
+        } else {
+            type = wave.types[randInt(0, wave.types.length - 1)];
+        }
+        
+        spawnEnemy(type, wave.multiplier);
+    }
+}
+
+// ============================================================
+// [XP_ORB] — 经验球
+// ============================================================
+function updateXpOrbs(dt) {
+    for (let i = xpOrbs.length - 1; i >= 0; i--) {
+        const orb = xpOrbs[i];
+        orb.lifetime -= dt;
+        if (orb.lifetime <= 0) { xpOrbs.splice(i, 1); continue; }
+        
+        const d = dist(player, orb);
+        
+        // 磁力吸引
+        if (d < player.pickupRadius * 2) {
+            orb.beingPulled = true;
+        }
+        
+        if (orb.beingPulled) {
+            const n = normalize(player.x - orb.x, player.y - orb.y);
+            const pullSpeed = 300;
+            orb.x += n.x * pullSpeed * dt;
+            orb.y += n.y * pullSpeed * dt;
+        }
+        
+        // 拾取
+        if (d < player.pickupRadius) {
+            xp += orb.value;
+            xpOrbs.splice(i, 1);
+            
+            // 检查升级
+            while (xp >= xpToNext) {
+                xp -= xpToNext;
+                level++;
+                xpToNext = xpRequired(level);
+                triggerLevelUp();
+            }
+        }
+    }
+}
+
+// ============================================================
+// [UPGRADE] — 升级系统
+// ============================================================
+function triggerLevelUp() {
+    levelUpFlash = 1.0;
+    
+    // 筛选可用升级
+    const available = UPGRADES.filter(u => {
+        const count = upgradeStacks[u.id] || 0;
+        return count < u.maxStack;
+    });
+    
+    if (available.length === 0) return; // 所有选项已满
+    
+    // 随机选3个（或更少）
+    const shuffled = available.slice().sort(() => Math.random() - 0.5);
+    upgradeOptions = shuffled.slice(0, Math.min(3, shuffled.length));
+    scene = SCENE.UPGRADE_PICK;
+}
+
+function applyUpgrade(upgrade) {
+    upgradeStacks[upgrade.id] = (upgradeStacks[upgrade.id] || 0) + 1;
+    
+    switch (upgrade.id) {
+        case 'torpedo_rate':
+            player.torpedoInterval *= 0.85;
+            break;
+        case 'torpedo_damage':
+            player.torpedoDamage *= 1.3;
+            break;
+        case 'torpedo_count':
+            player.torpedoCount++;
+            break;
+        case 'armor':
+            player.armor = Math.min(0.6, player.armor + 0.2);
+            break;
+        case 'speed':
+            player.speed *= 1.15;
+            break;
+        case 'magnet':
+            player.pickupRadius *= 1.4;
+            break;
+        case 'heal':
+            player.hp = Math.min(player.maxHp, player.hp + player.maxHp * 0.3);
+            break;
+        case 'sonar':
+            player.hasSonarPulse = true;
+            break;
+    }
+    
+    scene = SCENE.PLAYING;
+    upgradeOptions = [];
+}
+
+// ============================================================
+// [PARTICLE] — 粒子效果
+// ============================================================
+function spawnParticle(x, y, color, speed) {
+    if (particles.length >= MAX_PARTICLES) return;
+    const angle = Math.random() * Math.PI * 2;
+    const spd = randRange(speed * 10, speed * 30);
+    particles.push({
+        x, y, vx: Math.cos(angle) * spd, vy: Math.sin(angle) * spd,
+        life: randRange(0.3, 0.6), maxLife: 0.6, color, radius: randRange(1, 3)
+    });
+}
+
+function updateParticles(dt) {
+    for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vx *= 0.95;
+        p.vy *= 0.95;
+        p.life -= dt;
+        if (p.life <= 0) particles.splice(i, 1);
+    }
+}
+
+// ============================================================
+// [BACKGROUND PARTICLES]
+// ============================================================
+function updateBgParticles(dt) {
+    for (const p of bgParticles) {
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        // 环绕到摄像机可视范围
+        const screenX = p.x - camera.x;
+        const screenY = p.y - camera.y;
+        if (screenX < -50) p.x += W + 100;
+        if (screenX > W + 50) p.x -= W + 100;
+        if (screenY < -50) p.y += H + 100;
+        if (screenY > H + 50) p.y -= H + 100;
+    }
+}
+
+// ============================================================
+// [UPDATE] — 主更新
+// ============================================================
+function update(dt) {
+    if (scene === SCENE.PLAYING) {
+        gameTime += dt;
+        
+        // 检查胜利
+        if (gameTime >= GAME_DURATION) {
+            gameTime = GAME_DURATION;
+            scene = SCENE.END;
+            victory = true;
+            return;
+        }
+        
+        updatePlayer(dt);
+        updateCamera();
+        updateWaveSpawning(dt);
+        updateEnemies(dt);
+        updateTorpedoes(dt);
+        updateSonarPulse(dt);
+        updateXpOrbs(dt);
+        updateParticles(dt);
+        updateBgParticles(dt);
+        
+        if (levelUpFlash > 0) levelUpFlash -= dt * 3;
+    }
+}
+
+// ============================================================
+// [RENDER] — 渲染
+// ============================================================
+function drawBackground() {
+    // 深海渐变
+    const grad = ctx.createRadialGradient(W/2, H/2, 100, W/2, H/2, W * 0.7);
+    grad.addColorStop(0, '#0a1628');
+    grad.addColorStop(0.5, '#060e1a');
+    grad.addColorStop(1, '#020408');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    
+    // 背景粒子（漂浮微粒）
+    for (const p of bgParticles) {
+        const sx = p.x - camera.x;
+        const sy = p.y - camera.y;
+        ctx.globalAlpha = p.alpha;
+        ctx.fillStyle = '#4488cc';
+        ctx.beginPath();
+        ctx.arc(sx, sy, p.radius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+}
+
+function drawPlayer() {
+    const sx = player.x - camera.x;
+    const sy = player.y - camera.y;
+    
+    // 探照灯光晕
+    const lightGrad = ctx.createRadialGradient(sx, sy, 10, sx, sy, 200);
+    lightGrad.addColorStop(0, 'rgba(100,180,255,0.15)');
+    lightGrad.addColorStop(0.5, 'rgba(60,120,200,0.05)');
+    lightGrad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = lightGrad;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 200, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // 声波脉冲视觉
+    if (sonarPulseVisual > 0) {
+        ctx.strokeStyle = `rgba(0,200,255,${sonarPulseVisual * 0.6})`;
+        ctx.lineWidth = 2;
+        const r = player.sonarRadius * (1 - sonarPulseVisual * 0.3);
+        ctx.beginPath();
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.stroke();
+        // 第二圈
+        ctx.strokeStyle = `rgba(0,200,255,${sonarPulseVisual * 0.3})`;
+        ctx.beginPath();
+        ctx.arc(sx, sy, r * 1.3, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+    
+    // 潜艇主体
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(player.angle);
+    
+    // 受伤闪红
+    if (player.flashTimer > 0) {
+        ctx.fillStyle = '#ff4444';
+    } else {
+        ctx.fillStyle = '#55bbff';
+    }
+    
+    // 船体（椭圆形状）
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 20, 10, 0, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // 船头
+    ctx.fillStyle = '#88ddff';
+    ctx.beginPath();
+    ctx.moveTo(20, 0);
+    ctx.lineTo(12, -6);
+    ctx.lineTo(12, 6);
+    ctx.closePath();
+    ctx.fill();
+    
+    // 舱窗
+    ctx.fillStyle = '#aaeeff';
+    ctx.beginPath();
+    ctx.arc(5, 0, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ccffff';
+    ctx.beginPath();
+    ctx.arc(5, 0, 2, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // 尾翼
+    ctx.fillStyle = '#3399cc';
+    ctx.beginPath();
+    ctx.moveTo(-18, 0);
+    ctx.lineTo(-14, -8);
+    ctx.lineTo(-10, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-18, 0);
+    ctx.lineTo(-14, 8);
+    ctx.lineTo(-10, 0);
+    ctx.closePath();
+    ctx.fill();
+    
+    ctx.restore();
+}
+
+function drawEnemies() {
+    for (const e of enemies) {
+        const sx = e.x - camera.x;
+        const sy = e.y - camera.y;
+        
+        // 屏幕外剔除
+        if (sx < -50 || sx > W + 50 || sy < -50 || sy > H + 50) continue;
+        
+        // 发光效果
+        ctx.fillStyle = e.glowColor;
+        ctx.beginPath();
+        ctx.arc(sx, sy, e.radius * 1.8, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // 受伤闪白
+        if (e.flashTimer > 0) {
+            ctx.fillStyle = '#ffffff';
+        } else {
+            ctx.fillStyle = e.color;
+        }
+        
+        if (e.type === 'jellyfish') {
+            // 水母 — 半圆 + 触须
+            ctx.beginPath();
+            ctx.arc(sx, sy - 2, e.radius, Math.PI, 0);
+            ctx.fill();
+            ctx.strokeStyle = e.flashTimer > 0 ? '#ffffff' : e.color;
+            ctx.lineWidth = 1.5;
+            for (let t = -2; t <= 2; t++) {
+                ctx.beginPath();
+                ctx.moveTo(sx + t * 3, sy + 2);
+                const wave = Math.sin(gameTime * 3 + t) * 3;
+                ctx.quadraticCurveTo(sx + t * 3 + wave, sy + e.radius, sx + t * 3, sy + e.radius * 1.5);
+                ctx.stroke();
+            }
+        } else if (e.type === 'fangtooth') {
+            // 尖牙鱼 — 菱形鱼体
+            const angle = Math.atan2(player.y - e.y, player.x - e.x);
+            ctx.save();
+            ctx.translate(sx, sy);
+            ctx.rotate(angle);
+            ctx.beginPath();
+            ctx.moveTo(e.radius, 0);
+            ctx.lineTo(0, -e.radius * 0.6);
+            ctx.lineTo(-e.radius * 0.8, 0);
+            ctx.lineTo(0, e.radius * 0.6);
+            ctx.closePath();
+            ctx.fill();
+            // 眼睛
+            ctx.fillStyle = '#ffff00';
+            ctx.beginPath();
+            ctx.arc(e.radius * 0.3, -e.radius * 0.15, 2, 0, Math.PI * 2);
+            ctx.fill();
+            // 牙齿
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.moveTo(e.radius * 0.7, -2);
+            ctx.lineTo(e.radius + 3, 0);
+            ctx.lineTo(e.radius * 0.7, 2);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+        } else if (e.type === 'octopus') {
+            // 巨型章鱼 — 圆头 + 触手
+            ctx.beginPath();
+            ctx.arc(sx, sy, e.radius * 0.6, 0, Math.PI * 2);
+            ctx.fill();
+            // 触手
+            ctx.strokeStyle = e.flashTimer > 0 ? '#ffffff' : e.color;
+            ctx.lineWidth = 3;
+            for (let t = 0; t < 8; t++) {
+                const a = (t / 8) * Math.PI * 2 + gameTime * 0.5;
+                ctx.beginPath();
+                ctx.moveTo(sx + Math.cos(a) * e.radius * 0.5, sy + Math.sin(a) * e.radius * 0.5);
+                const midA = a + Math.sin(gameTime * 2 + t) * 0.3;
+                ctx.quadraticCurveTo(
+                    sx + Math.cos(midA) * e.radius * 0.9,
+                    sy + Math.sin(midA) * e.radius * 0.9,
+                    sx + Math.cos(a + Math.sin(gameTime + t) * 0.4) * e.radius,
+                    sy + Math.sin(a + Math.sin(gameTime + t) * 0.4) * e.radius
+                );
+                ctx.stroke();
+            }
+            // 眼睛
+            ctx.fillStyle = '#ffff44';
+            ctx.beginPath();
+            ctx.arc(sx - 5, sy - 3, 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(sx + 5, sy - 3, 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#000';
+            ctx.beginPath();
+            ctx.arc(sx - 5, sy - 3, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(sx + 5, sy - 3, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+}
+
+function drawProjectiles() {
+    for (const p of projectiles) {
+        const sx = p.x - camera.x;
+        const sy = p.y - camera.y;
+        
+        // 鱼雷发光
+        ctx.fillStyle = 'rgba(255,200,50,0.3)';
+        ctx.beginPath();
+        ctx.arc(sx, sy, 6, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // 鱼雷本体
+        const angle = Math.atan2(p.vy, p.vx);
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.rotate(angle);
+        ctx.fillStyle = '#ffcc33';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 6, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ff6600';
+        ctx.beginPath();
+        ctx.moveTo(-6, -2);
+        ctx.lineTo(-10, -4);
+        ctx.lineTo(-8, 0);
+        ctx.lineTo(-10, 4);
+        ctx.lineTo(-6, 2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+    }
+}
+
+function drawXpOrbs() {
+    for (const orb of xpOrbs) {
+        const sx = orb.x - camera.x;
+        const sy = orb.y - camera.y;
+        
+        if (sx < -20 || sx > W + 20 || sy < -20 || sy > H + 20) continue;
+        
+        const pulse = 1 + Math.sin(gameTime * 5) * 0.2;
+        
+        // 发光
+        ctx.fillStyle = 'rgba(0,255,150,0.2)';
+        ctx.beginPath();
+        ctx.arc(sx, sy, 8 * pulse, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // 本体
+        ctx.fillStyle = '#00ff88';
+        ctx.beginPath();
+        ctx.arc(sx, sy, 4 * pulse, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.fillStyle = '#aaffcc';
+        ctx.beginPath();
+        ctx.arc(sx, sy, 2 * pulse, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+function drawParticles() {
+    for (const p of particles) {
+        const sx = p.x - camera.x;
+        const sy = p.y - camera.y;
+        const alpha = p.life / p.maxLife;
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(sx, sy, p.radius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+}
+
+function drawHUD() {
+    const pad = 15;
+    const barW = 200, barH = 16;
+    
+    // 血量条
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(pad, pad, barW, barH);
+    const hpRatio = player.hp / player.maxHp;
+    const hpColor = hpRatio > 0.5 ? '#44ff44' : hpRatio > 0.25 ? '#ffaa00' : '#ff3333';
+    ctx.fillStyle = hpColor;
+    ctx.fillRect(pad, pad, barW * hpRatio, barH);
+    ctx.strokeStyle = '#88aacc';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(pad, pad, barW, barH);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`HP ${Math.ceil(player.hp)} / ${player.maxHp}`, pad + barW/2, pad + 12);
+    
+    // 经验条
+    const xpY = pad + barH + 6;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(pad, xpY, barW, barH);
+    ctx.fillStyle = '#44aaff';
+    ctx.fillRect(pad, xpY, barW * (xp / xpToNext), barH);
+    ctx.strokeStyle = '#88aacc';
+    ctx.strokeRect(pad, xpY, barW, barH);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(`Lv.${level}  ${xp} / ${xpToNext}`, pad + barW/2, xpY + 12);
+    
+    // 存活时间
+    const timeStr = formatTime(gameTime);
+    const totalStr = formatTime(GAME_DURATION);
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 18px monospace';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(`${timeStr} / ${totalStr}`, W / 2, 30);
+    
+    // 波次
+    const waveIdx = getCurrentWave();
+    ctx.font = '12px monospace';
+    ctx.fillStyle = '#88ccff';
+    ctx.fillText(`WAVE ${waveIdx + 1} / ${WAVE_CONFIG.length}`, W / 2, 48);
+    
+    // 击杀数
+    ctx.textAlign = 'right';
+    ctx.font = '14px monospace';
+    ctx.fillStyle = '#ffcc44';
+    ctx.fillText(`击杀: ${kills}`, W - pad, pad + 16);
+    
+    // 敌人数
+    ctx.fillStyle = '#ff8888';
+    ctx.fillText(`敌人: ${enemies.length}`, W - pad, pad + 34);
+    
+    // 升级闪光
+    if (levelUpFlash > 0) {
+        ctx.fillStyle = `rgba(255,255,100,${levelUpFlash * 0.15})`;
+        ctx.fillRect(0, 0, W, H);
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 36px monospace';
+        ctx.fillStyle = `rgba(255,255,100,${levelUpFlash})`;
+        ctx.fillText('LEVEL UP!', W/2, H/2 - 50);
+    }
+}
+
+function formatTime(s) {
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+
+// ============================================================
+// [SCENE RENDERS]
+// ============================================================
+function drawMenu() {
+    // 深海背景
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#040810');
+    grad.addColorStop(0.5, '#0a1628');
+    grad.addColorStop(1, '#020408');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    
+    // 漂浮粒子
+    for (const p of bgParticles) {
+        ctx.globalAlpha = p.alpha;
+        ctx.fillStyle = '#4488cc';
+        ctx.beginPath();
+        ctx.arc(p.x + W/2, p.y + H/2, p.radius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    
+    // 标题
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 48px monospace';
+    const titleGrad = ctx.createLinearGradient(W/2 - 200, 0, W/2 + 200, 0);
+    titleGrad.addColorStop(0, '#00aaff');
+    titleGrad.addColorStop(0.5, '#44ffcc');
+    titleGrad.addColorStop(1, '#00aaff');
+    ctx.fillStyle = titleGrad;
+    ctx.fillText('🌊 深海求生 🌊', W/2, H/2 - 100);
+    
+    ctx.font = '20px monospace';
+    ctx.fillStyle = '#88bbdd';
+    ctx.fillText('DEEP SEA SURVIVOR', W/2, H/2 - 60);
+    
+    // 操作说明
+    ctx.font = '14px monospace';
+    ctx.fillStyle = '#6699aa';
+    ctx.fillText('WASD / 方向键 — 移动潜艇', W/2, H/2);
+    ctx.fillText('潜艇会自动发射鱼雷攻击最近的敌人', W/2, H/2 + 25);
+    ctx.fillText('击杀怪物获取经验，升级时选择强化', W/2, H/2 + 50);
+    ctx.fillText('存活 3 分钟即可获胜！', W/2, H/2 + 75);
+    
+    // 开始提示
+    const blink = Math.sin(Date.now() / 300) > 0;
+    if (blink) {
+        ctx.font = 'bold 22px monospace';
+        ctx.fillStyle = '#44ffcc';
+        ctx.fillText('按 Enter / Space 或 点击 开始游戏', W/2, H/2 + 140);
+    }
+}
+
+function drawUpgradePick() {
+    // 半透明遮罩
+    ctx.fillStyle = 'rgba(0,0,10,0.75)';
+    ctx.fillRect(0, 0, W, H);
+    
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 28px monospace';
+    ctx.fillStyle = '#44ffcc';
+    ctx.fillText('选择强化', W/2, 100);
+    
+    ctx.font = '14px monospace';
+    ctx.fillStyle = '#88aacc';
+    ctx.fillText('点击选项 或 按数字键 1/2/3', W/2, 135);
+    
+    const cardW = 220, cardH = 160, gap = 30;
+    const totalW = upgradeOptions.length * cardW + (upgradeOptions.length - 1) * gap;
+    const startX = (W - totalW) / 2;
+    const cardY = 180;
+    
+    for (let i = 0; i < upgradeOptions.length; i++) {
+        const u = upgradeOptions[i];
+        const cx = startX + i * (cardW + gap);
+        
+        // 检测鼠标悬停
+        const hover = mouseX >= cx && mouseX <= cx + cardW && mouseY >= cardY && mouseY <= cardY + cardH;
+        
+        // 卡片背景
+        ctx.fillStyle = hover ? 'rgba(40,80,120,0.9)' : 'rgba(20,40,60,0.9)';
+        ctx.fillRect(cx, cardY, cardW, cardH);
+        ctx.strokeStyle = hover ? '#44ffcc' : '#2266aa';
+        ctx.lineWidth = hover ? 2 : 1;
+        ctx.strokeRect(cx, cardY, cardW, cardH);
+        
+        // 编号
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 14px monospace';
+        ctx.fillStyle = '#88aacc';
+        ctx.fillText(`[${i + 1}]`, cx + cardW/2, cardY + 25);
+        
+        // 图标
+        ctx.font = '32px serif';
+        ctx.fillText(u.icon, cx + cardW/2, cardY + 65);
+        
+        // 名称
+        ctx.font = 'bold 16px monospace';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(u.name, cx + cardW/2, cardY + 100);
+        
+        // 描述
+        ctx.font = '13px monospace';
+        ctx.fillStyle = '#88ccff';
+        ctx.fillText(u.desc, cx + cardW/2, cardY + 125);
+        
+        // 已叠加次数
+        const count = upgradeStacks[u.id] || 0;
+        if (count > 0) {
+            ctx.font = '11px monospace';
+            ctx.fillStyle = '#ffaa44';
+            ctx.fillText(`已选 ${count} 次`, cx + cardW/2, cardY + 148);
+        }
+        
+        // 点击处理
+        if (hover && mouseClicked) {
+            applyUpgrade(u);
+        }
+    }
+}
+
+function drawEndScreen() {
+    ctx.fillStyle = 'rgba(0,0,10,0.85)';
+    ctx.fillRect(0, 0, W, H);
+    
+    ctx.textAlign = 'center';
+    
+    if (victory) {
+        ctx.font = 'bold 42px monospace';
+        ctx.fillStyle = '#44ffcc';
+        ctx.fillText('🎉 胜利！ 🎉', W/2, H/2 - 100);
+        ctx.font = '18px monospace';
+        ctx.fillStyle = '#88ddcc';
+        ctx.fillText('你成功在深海中存活了下来！', W/2, H/2 - 60);
+    } else {
+        ctx.font = 'bold 42px monospace';
+        ctx.fillStyle = '#ff4444';
+        ctx.fillText('💀 潜艇损毁 💀', W/2, H/2 - 100);
+        ctx.font = '18px monospace';
+        ctx.fillStyle = '#cc8888';
+        ctx.fillText('你的潜艇被深海怪物摧毁了...', W/2, H/2 - 60);
+    }
+    
+    // 统计
+    ctx.font = '16px monospace';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(`存活时间: ${formatTime(gameTime)}`, W/2, H/2 + 0);
+    ctx.fillText(`击杀数: ${kills}`, W/2, H/2 + 28);
+    ctx.fillText(`等级: ${level}`, W/2, H/2 + 56);
+    
+    // 重新开始
+    const blink = Math.sin(Date.now() / 300) > 0;
+    if (blink) {
+        ctx.font = 'bold 20px monospace';
+        ctx.fillStyle = '#44ffcc';
+        ctx.fillText('按 R 或 点击 重新开始', W/2, H/2 + 120);
+    }
+}
+
+// ============================================================
+// [MAIN] — 游戏主循环
+// ============================================================
+let lastTime = 0;
+scene = SCENE.MENU;
+
+// 初始化菜单背景粒子
+bgParticles = [];
+for (let i = 0; i < 30; i++) {
+    bgParticles.push({
+        x: randRange(-W/2, W/2), y: randRange(-H/2, H/2),
+        vx: randRange(-5, 5), vy: randRange(-8, -2),
+        radius: randRange(1, 3), alpha: randRange(0.1, 0.4)
+    });
+}
+
+function gameLoop(timestamp) {
+    const dt = Math.min((timestamp - lastTime) / 1000, 0.05); // cap at 50ms
+    lastTime = timestamp;
+    
+    // 输入处理
+    if (scene === SCENE.MENU) {
+        if (keys['Enter'] || keys['Space'] || mouseClicked) {
+            initGame();
+        }
+        // 更新菜单背景粒子
+        for (const p of bgParticles) {
+            p.y += p.vy * dt;
+            if (p.y < -H/2) p.y = H/2;
+        }
+        drawMenu();
+    } else if (scene === SCENE.PLAYING) {
+        update(dt);
+        drawBackground();
+        drawXpOrbs();
+        drawEnemies();
+        drawProjectiles();
+        drawPlayer();
+        drawParticles();
+        drawHUD();
+    } else if (scene === SCENE.UPGRADE_PICK) {
+        // 游戏画面冻结
+        drawBackground();
+        drawXpOrbs();
+        drawEnemies();
+        drawProjectiles();
+        drawPlayer();
+        drawParticles();
+        drawHUD();
+        drawUpgradePick();
+        
+        // 键盘选择
+        if (keys['Digit1'] && upgradeOptions.length >= 1) { applyUpgrade(upgradeOptions[0]); keys['Digit1'] = false; }
+        if (keys['Digit2'] && upgradeOptions.length >= 2) { applyUpgrade(upgradeOptions[1]); keys['Digit2'] = false; }
+        if (keys['Digit3'] && upgradeOptions.length >= 3) { applyUpgrade(upgradeOptions[2]); keys['Digit3'] = false; }
+    } else if (scene === SCENE.END) {
+        // 保持绘制最后一帧
+        drawBackground();
+        drawXpOrbs();
+        drawEnemies();
+        drawProjectiles();
+        drawPlayer();
+        drawParticles();
+        drawHUD();
+        drawEndScreen();
+        
+        if (keys['KeyR'] || mouseClicked) {
+            initGame();
+        }
+    }
+    
+    mouseClicked = false;
+    requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
