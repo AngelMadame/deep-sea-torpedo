@@ -2,3 +2,5 @@ node_modules
 .vs
 .vscode
 *.log
+
+.vercel
