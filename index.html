@@ -127,25 +127,25 @@ canvas.addEventListener('mousemove',e=>{const r=canvas.getBoundingClientRect();m
 canvas.addEventListener('click',()=>{mclick=true});
 
 // Touch events for joystick + mobile pause
-function canvasCoords(e){
- const t=e.touches[0]||e.changedTouches[0];
- if(!t)return null;
- const r=canvas.getBoundingClientRect();
- const sx=(t.clientX-r.left)*(W/r.width);
- const sy=(t.clientY-r.top)*(H/r.height);
- return {x:sx,y:sy};
-}
 canvas.addEventListener('touchstart',e=>{
- const c=canvasCoords(e);if(!c)return;
- mx=c.x;my=c.y;
- // Check mobile pause button (top-right, ~55x44 area)
- if(isMobile&&c.x>W-60&&c.y<60){mclick=true;return}
+ e.preventDefault();
+ const t=e.changedTouches[0];
+ if(!t)return;
+ const r=canvas.getBoundingClientRect();
+ const cx=(t.clientX-r.left)*(W/r.width);
+ const cy=(t.clientY-r.top)*(H/r.height);
+ mx=cx;my=cy;
+ // Mobile pause button (top-right)
+ if(isMobile&&cx>W-60&&cy<60){mclick=true;return}
  // Start joystick on left half (only during gameplay)
- if(c.x<W/2&&!joystick.active&&(scene===SC.PLAYING||scene===SC.UPGRADE)){
-  joystick.active=true;joystick.touchId=e.touches[0].identifier;
-  joystick.baseX=c.x;joystick.baseY=c.y;
-  joystick.thumbX=c.x;joystick.thumbY=c.y;joystick.dx=0;joystick.dy=0;
+ if(cx<W/2&&!joystick.active&&(scene===SC.PLAYING||scene===SC.UPGRADE)){
+  joystick.active=true;joystick.touchId=t.identifier;
+  joystick.baseX=cx;joystick.baseY=cy;
+  joystick.thumbX=cx;joystick.thumbY=cy;joystick.dx=0;joystick.dy=0;
+  return;
  }
+ // All other touches = UI click
+ mclick=true;
 },{passive:false});
 canvas.addEventListener('touchmove',e=>{
  e.preventDefault();
@@ -167,6 +167,7 @@ canvas.addEventListener('touchmove',e=>{
  }
 },{passive:false});
 canvas.addEventListener('touchend',e=>{
+ e.preventDefault();
  for(let i=0;i<e.changedTouches.length;i++){
   if(e.changedTouches[i].identifier===joystick.touchId){
    joystick.active=false;joystick.touchId=null;
