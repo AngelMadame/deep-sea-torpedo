@@ -138,7 +138,7 @@ canvas.addEventListener('touchstart',e=>{
  // Mobile pause button (top-right)
  if(isMobile&&cx>W-60&&cy<60){mclick=true;return}
  // Start joystick on left half (only during gameplay)
- if(cx<W/2&&!joystick.active&&(scene===SC.PLAYING||scene===SC.UPGRADE)){
+ if(cx<W/2&&!joystick.active&&scene===SC.PLAYING){
   joystick.active=true;joystick.touchId=t.identifier;
   joystick.baseX=cx;joystick.baseY=cy;
   joystick.thumbX=cx;joystick.thumbY=cy;joystick.dx=0;joystick.dy=0;
@@ -167,7 +167,6 @@ canvas.addEventListener('touchmove',e=>{
  }
 },{passive:false});
 canvas.addEventListener('touchend',e=>{
- e.preventDefault();
  for(let i=0;i<e.changedTouches.length;i++){
   if(e.changedTouches[i].identifier===joystick.touchId){
    joystick.active=false;joystick.touchId=null;
@@ -1064,9 +1063,7 @@ function loop(ts){
   }
  }else if(scene===SC.UPGRADE){
   drawBg();drawOrbs();drawEnemies();drawProjs();drawPlayer();drawParts();drawHUD();
-  if(isMobile){drawJoystick();
-   if(mclick&&mobilePauseBtn.hover){scene=SC.PAUSED;pauseMenuIdx=0}
-  }
+  if(isMobile&&mclick&&mobilePauseBtn.hover){scene=SC.PAUSED;pauseMenuIdx=0}
   drawUpgrade();handleUpgradeInput();
  }else if(scene===SC.PAUSED){
   drawBg();drawOrbs();drawEnemies();drawProjs();drawPlayer();drawParts();drawHUD();
